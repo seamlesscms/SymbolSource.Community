@@ -10,3 +10,5 @@ packages/*
 !packages/repositories.config
 App_Data
 *.nupkg
+/Release
+/.vs
