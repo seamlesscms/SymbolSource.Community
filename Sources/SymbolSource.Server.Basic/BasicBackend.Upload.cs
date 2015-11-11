@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Ionic.Zip;
+using SymbolSource.Gateway.NuGet.Core;
 using SymbolSource.Processing.Basic;
 using SymbolSource.Processing.Basic.Projects;
 using SymbolSource.Server.Management.Client;
@@ -24,7 +25,7 @@ namespace SymbolSource.Server.Basic
             if (symbolPackageData != null)
                 CreateJob(package, symbolPackageData);
 
-            InvalidateCache();
+            NuGetTranslator.ExpirePackageHash(package.Version.Project, package.Version.Name);
 
             return new UploadReport
                        {

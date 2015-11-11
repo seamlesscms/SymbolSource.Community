@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Web;
+using System.Web.Caching;
 using SymbolSource.Server.Management.Client;
 using Version = SymbolSource.Server.Management.Client.Version;
 
@@ -10,9 +12,6 @@ namespace SymbolSource.Server.Basic
 {
     public partial class BasicBackend
     {
-        private static IList<Version> _cachedVersionRepository = new List<Version>();
-        private static object _syncLock = new object();
-
         private string GetPathToImageFile(string name, string symbolHash)
         {
             string binaryIndexPath = Path.Combine(configuration.IndexPath, name);
@@ -59,11 +58,19 @@ namespace SymbolSource.Server.Basic
 
         private string GetPackageSHA512(string path)
         {
-            using (var stream = File.OpenRead(Path.Combine(configuration.DataPath, path)))
+            string cachedHash = HttpRuntime.Cache.Get("PackageHash-" + path) as string;
+            if (cachedHash == null)
             {
-                using (var hasher = new SHA512Managed())
-                    return Convert.ToBase64String(hasher.ComputeHash(stream));
+                string absolutePath = Path.Combine(configuration.DataPath, path);
+                using (var stream = File.OpenRead(absolutePath))
+                {
+                    using (var hasher = new SHA512Managed())
+                        cachedHash = Convert.ToBase64String(hasher.ComputeHash(stream));
+                }
+                HttpRuntime.Cache.Add("PackageHash-" + path, cachedHash, new CacheDependency(absolutePath),
+                    Cache.NoAbsoluteExpiration, Cache.NoSlidingExpiration, CacheItemPriority.NotRemovable, null);
             }
+            return cachedHash;
         }
 
         private IEnumerable<string> GetPackageNameCandidates(Version version, string packageFormat)
@@ -180,90 +187,63 @@ namespace SymbolSource.Server.Basic
 
         public Version[] GetPackages(ref Repository repository, ref PackageFilter filter, string packageFormat, string projectId)
         {
-#if DEBUG
-            var startTime = DateTime.Now;
-            System.Diagnostics.Trace.WriteLine(string.Format("Start: {0}", startTime.ToString("s")));
-#endif
-            if (_cachedVersionRepository.Count == 0)
+            var repositoryCopy = repository;
+
+            var versions =
+                Directory.EnumerateDirectories(configuration.DataPath)
+                    .SelectMany(
+                        projectPath =>
+                            Directory.EnumerateDirectories(projectPath)
+                                .Select(
+                                    versionPath =>
+                                        new Version
+                                        {
+                                            Company = repositoryCopy.Company,
+                                            Repository = repositoryCopy.Name,
+                                            Project = Path.GetFileName(projectPath),
+                                            Name = Path.GetFileName(versionPath),
+                                            PackageFormat = packageFormat,
+                                        })
+                                .Where(version => GetPackagePathFromVersion(version, packageFormat) != null)
+                                .Select(version => new Version
+                                {
+                                    Company = version.Company,
+                                    Repository = version.Repository,
+                                    Project = version.Project,
+                                    Name = version.Name,
+                                    PackageFormat = "SHA512",
+                                    PackageHash =
+                                        GetPackageSHA512(GetPackagePathFromVersion(version, packageFormat)),
+                                })
+                    )
+                    .ToArray();
+
+            // Reorder according semver
+            List<Version> sortedVersions = versions.ToList();
+            sortedVersions.Sort();
+            sortedVersions.Reverse();
+
+            foreach (var version in sortedVersions)
             {
-                lock (_syncLock)
-                {
-                    if (_cachedVersionRepository.Count == 0)
-                    {
-                        var repositoryCopy = repository;
-
-                        var versions =
-                            Directory.EnumerateDirectories(configuration.DataPath)
-                                .SelectMany(
-                                    projectPath =>
-                                        Directory.EnumerateDirectories(projectPath)
-                                            .Select(
-                                                versionPath =>
-                                                    new Version
-                                                    {
-                                                        Company = repositoryCopy.Company,
-                                                        Repository = repositoryCopy.Name,
-                                                        Project = Path.GetFileName(projectPath),
-                                                        Name = Path.GetFileName(versionPath),
-                                                        PackageFormat = packageFormat,
-                                                    })
-                                            .Where(version => GetPackagePathFromVersion(version, packageFormat) != null)
-                                            .Select(version => new Version
-                                            {
-                                                Company = version.Company,
-                                                Repository = version.Repository,
-                                                Project = version.Project,
-                                                Name = version.Name,
-                                                PackageFormat = "SHA512",
-                                                PackageHash =
-                                                    GetPackageSHA512(GetPackagePathFromVersion(version, packageFormat)),
-                                            })
-                                )
-                                .ToArray();
-
-                        // Reorder according semver
-                        List<Version> sortedVersions = versions.ToList();
-                        sortedVersions.Sort();
-                        sortedVersions.Reverse();
-
-                        foreach (var version in sortedVersions)
-                        {
-                            bool isLatest =
-                                sortedVersions.Where(v => v.Project == version.Project && !v.Name.Contains("-"))
-                                    .Select(v => v.Name)
-                                    .FirstOrDefault() == version.Name;
-                            bool isAbsoluteLatest =
-                                sortedVersions.Where(v => v.Project == version.Project)
-                                    .Select(v => v.Name)
-                                    .FirstOrDefault() ==
-                                version.Name;
-                            var metadata =
-                                new List<MetadataEntry>(
-                                    GetPackageMetadata(GetPackagePathFromVersion(version, packageFormat), packageFormat) ??
-                                    new MetadataEntry[0]);
-                            var metadataWrapper = new MetadataWrapper(metadata);
-                            metadataWrapper["IsLatestVersion"] = isLatest.ToString();
-                            metadataWrapper["IsAbsoluteLatestName"] = isAbsoluteLatest.ToString();
-                            version.Metadata = metadata.ToArray();
-                        }
-
-                        _cachedVersionRepository = sortedVersions;
-                    }
-                }
+                bool isLatest =
+                    sortedVersions.Where(v => v.Project == version.Project && !v.Name.Contains("-"))
+                        .Select(v => v.Name)
+                        .FirstOrDefault() == version.Name;
+                bool isAbsoluteLatest =
+                    sortedVersions.Where(v => v.Project == version.Project)
+                        .Select(v => v.Name)
+                        .FirstOrDefault() ==
+                    version.Name;
+                var metadata =
+                    new List<MetadataEntry>(
+                        GetPackageMetadata(GetPackagePathFromVersion(version, packageFormat), packageFormat) ??
+                        new MetadataEntry[0]);
+                var metadataWrapper = new MetadataWrapper(metadata);
+                metadataWrapper["IsLatestVersion"] = isLatest.ToString();
+                metadataWrapper["IsAbsoluteLatestName"] = isAbsoluteLatest.ToString();
+                version.Metadata = metadata.ToArray();
             }
-#if DEBUG
-            TimeSpan elapsed2 = DateTime.Now - startTime;
-            System.Diagnostics.Trace.WriteLine(string.Format("End: {0} - Elapsed2: {1}", DateTime.Now.ToString("s"), elapsed2.ToString("g")));
-#endif
-            return _cachedVersionRepository.ToArray();
-        }
-
-        private void InvalidateCache()
-        {
-            lock (_syncLock)
-            {
-                _cachedVersionRepository.Clear();
-            }
+            return sortedVersions.ToArray();
         }
 
         public Caller CreateUserByKey(string company, string type, string value)

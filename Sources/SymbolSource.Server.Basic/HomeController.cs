@@ -93,11 +93,15 @@ namespace SymbolSource.Server.Basic
             }
             catch (WebException e)
             {
-                var result = (HttpWebResponse) e.Response;
-                using (var stream = result.GetResponseStream())
-                using (
-                    var reader = new StreamReader(stream, string.IsNullOrEmpty(result.ContentEncoding) ? Encoding.UTF8 : Encoding.GetEncoding(result.ContentEncoding)))
-                    return string.Format("{0} - {1}\n\n{2}", result.StatusCode, result.StatusDescription, reader.ReadToEnd());
+                HttpWebResponse result = e.Response as HttpWebResponse;
+                if (result != null)
+                {
+                    using (var stream = result.GetResponseStream())
+                    using (
+                        var reader = new StreamReader(stream, string.IsNullOrEmpty(result.ContentEncoding) ? Encoding.UTF8 : Encoding.GetEncoding(result.ContentEncoding)))
+                        return string.Format("{0} - {1}\n\n{2}", result.StatusCode, result.StatusDescription, reader.ReadToEnd());
+                }
+                throw;
             }
         }
 

@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
+using System.Web;
+using System.Web.Caching;
 using NuGet;
 using SymbolSource.Server.Management.Client;
 using Version = SymbolSource.Server.Management.Client.Version;
@@ -12,6 +14,12 @@ namespace SymbolSource.Gateway.NuGet.Core
 {
     public static class NuGetTranslator
     {
+        public static void ExpirePackageHash(string project, string name)
+        {
+            string cacheKey = GetCacheKey(project, name);
+            HttpRuntime.Cache.Remove(cacheKey);
+        }
+
         public static Package ConvertToPackage(Version version)
         {
             var metadataWrapper = new MetadataWrapper(version.Metadata);
@@ -104,16 +112,31 @@ namespace SymbolSource.Gateway.NuGet.Core
             metadataWrapper["PackageSize"] = stream.Length.ToString();
             metadataWrapper["PackageHashAlgorithm"] = "SHA512";
 
-            stream.Seek(0, SeekOrigin.Begin);
-            using (var hasher = new SHA512Managed())
-                metadataWrapper["PackageHash"] = Convert.ToBase64String(hasher.ComputeHash(stream));
+            string cacheKey = GetCacheKey(version.Project, version.Name);
+            string cachedHash = HttpRuntime.Cache.Get(cacheKey) as string;
 
+            if (cachedHash == null)
+            {
+                stream.Seek(0, SeekOrigin.Begin);
+                using (var hasher = new SHA512Managed())
+                    cachedHash = Convert.ToBase64String(hasher.ComputeHash(stream));
+
+                HttpRuntime.Cache.Add(cacheKey, cachedHash, null, Cache.NoAbsoluteExpiration, Cache.NoSlidingExpiration,
+                    CacheItemPriority.NotRemovable, null);
+            }
+
+            metadataWrapper["PackageHash"] = cachedHash;
             metadataWrapper["DownloadCount"] = "000000";
             metadataWrapper["CreatedDate"] = DateTime.UtcNow.ToString("s");
 
             version.Metadata = metadata.ToArray();
 
             return version;
+        }
+
+        private static string GetCacheKey(string project, string name)
+        {
+            return ("NugetTranslator-" + project + "-" + name).ToLower();
         }
 
         private static IEnumerable<string> ConvertDependencySetToStrings(PackageDependencySet dependencySet)
